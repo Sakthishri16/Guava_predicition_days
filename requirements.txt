@@ -8,3 +8,4 @@ scikit-image
 matplotlib
 openpyxl
 Pillow
+streamlit
