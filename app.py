@@ -1,29 +1,38 @@
+"""
+app.py — Guava Quality Predictor (lightweight: onnxruntime only, no torch)
+"""
 import gradio as gr
-import torch
-import torchvision.transforms as transforms
+import onnxruntime as ort
+import numpy as np
+import json, tempfile, os
 from PIL import Image
-import tempfile, os
-from models.model import GuavaNet
 from utils.feature_extraction import extract_features
 
 LABEL_NAMES = ['L', 'A', 'B', 'FIRMNESS', 'TA', 'TSS', 'PH', 'REMAINING DAYS TO RIPE']
 
-# ── Load model + label stats ──────────────────────────────────────────────────
-model = GuavaNet(handcrafted_dim=190, num_outputs=8)
-model.load_state_dict(torch.load("model.pth", map_location="cpu"))
-model.eval()
+# ── Load ONNX session ─────────────────────────────────────────────────────────
+sess = ort.InferenceSession("model.onnx",
+       providers=["CPUExecutionProvider"])
 
-stats      = torch.load("label_stats.pt", map_location="cpu")
-label_mean = stats['mean']
-label_std  = stats['std']
+# ── Load label stats (plain numpy, no torch) ──────────────────────────────────
+import torch
+_stats     = torch.load("label_stats.pt", map_location="cpu")
+label_mean = _stats['mean'].numpy()   # (8,)
+label_std  = _stats['std'].numpy()    # (8,)
+del torch   # free torch after loading stats
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-])
+# ── Image pre-processing (replaces torchvision transforms) ───────────────────
+_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
+def preprocess(pil_img: Image.Image) -> np.ndarray:
+    img = pil_img.resize((224, 224), Image.BILINEAR).convert("RGB")
+    arr = np.array(img, dtype=np.float32) / 255.0          # (224,224,3)
+    arr = (arr - _MEAN) / _STD                             # normalize
+    arr = arr.transpose(2, 0, 1)[np.newaxis, ...]          # (1,3,224,224)
+    return arr.astype(np.float32)
 
+# ── Inference ─────────────────────────────────────────────────────────────────
 def predict(pil_image):
     if pil_image is None:
         return tuple(["—"] * len(LABEL_NAMES))
@@ -33,19 +42,18 @@ def predict(pil_image):
         pil_image.save(tmp_path)
 
     try:
-        img_t  = transform(pil_image).unsqueeze(0)
-        feat_t = torch.tensor(extract_features(tmp_path),
-                              dtype=torch.float32).unsqueeze(0)
+        img_arr  = preprocess(pil_image)                              # (1,3,224,224)
+        feat_arr = extract_features(tmp_path)[np.newaxis, :]          # (1,190)
 
-        with torch.no_grad():
-            preds = model(img_t, feat_t).squeeze()
+        preds = sess.run(["predictions"],
+                         {"image": img_arr, "features": feat_arr})[0]  # (1,8)
+        preds = preds[0] * label_std + label_mean                      # inverse z-score
 
-        preds = preds * label_std + label_mean   # inverse z-score
         return tuple(f"{v:.4f}" for v in preds.tolist())
     finally:
         os.unlink(tmp_path)
 
-
+# ── UI ────────────────────────────────────────────────────────────────────────
 css = """
 .title-block { text-align:center; padding:20px 0 10px; }
 .title-block h1 { font-size:2.2em; color:#2d6a2d; margin-bottom:4px; }
@@ -66,17 +74,16 @@ with gr.Blocks(title="Guava Quality Predictor", css=css,
 
     with gr.Row():
         with gr.Column(scale=1):
-            image_input = gr.Image(type="pil", label="📷 Upload Guava Image",
-                                   height=320)
+            image_input = gr.Image(type="pil", label="📷 Upload Guava Image", height=320)
             predict_btn = gr.Button("🔍 Predict", variant="primary",
                                     elem_classes="predict-btn")
 
         with gr.Column(scale=2):
             gr.Markdown("### 🎨 Colour (LAB)")
             with gr.Row():
-                out_L = gr.Textbox(label="💡 L  — Lightness",      interactive=False)
-                out_A = gr.Textbox(label="🔴 A  — Green / Red",    interactive=False)
-                out_B = gr.Textbox(label="🟡 B  — Blue / Yellow",  interactive=False)
+                out_L = gr.Textbox(label="💡 L  — Lightness",     interactive=False)
+                out_A = gr.Textbox(label="🔴 A  — Green / Red",   interactive=False)
+                out_B = gr.Textbox(label="🟡 B  — Blue / Yellow", interactive=False)
 
             gr.Markdown("### 🧪 Chemical Properties")
             with gr.Row():
