@@ -1,5 +1,7 @@
 venv/
 __pycache__/
 *.pyc
-model.pth
 *.pth
+*.onnx
+predictions.xlsx
+label_stats.pt
