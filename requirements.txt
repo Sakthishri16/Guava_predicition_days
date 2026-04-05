@@ -10,3 +10,4 @@ openpyxl
 Pillow
 streamlit
 gradio
+onnxruntime
